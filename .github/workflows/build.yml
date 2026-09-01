@@ -1,0 +1,86 @@
+name: Build ImmortalWrt 24.10.6
+on:
+  workflow_dispatch:
+env:
+  REPO_URL: https://github.com/immortalwrt/immortalwrt.git
+  REPO_TAG: v24.10.6
+  CONFIG_FILE: config/xdr6086.config
+  DIY_P1_SH: diy-part1.sh
+  DIY_P2_SH: diy-part2.sh
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout 本地仓库
+        uses: actions/checkout@v4
+
+      - name: 安装编译依赖
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo apt update
+          sudo apt install -y build-essential gcc g++ binutils bzip2 flex python3 python3-pip python3-setuptools python3-dev make cmake libncurses5-dev libssl-dev git wget curl unzip rsync bc libz-dev
+
+      - name: 恢复源码缓存
+        uses: actions/cache@v4
+        id: source-cache
+        with:
+          path: openwrt
+          key: source-${{ env.REPO_TAG }}-${{ github.run_id }}
+          restore-keys: |
+            source-${{ env.REPO_TAG }}-
+
+      - name: 拉取/校验 v24.10.6 稳定源码（带更新判断）
+        run: |
+          TAG="${{ env.REPO_TAG }}"
+          REPO="${{ env.REPO_URL }}"
+          # 有缓存则对比远程版本，无缓存则直接全新拉取
+          if [ -d openwrt/.git ]; then
+            echo "检测到源码缓存，检查远程是否有更新..."
+            LOCAL_HASH=$(git -C openwrt rev-parse HEAD)
+            REMOTE_HASH=$(git ls-remote --tags --refs "$REPO" "$TAG" | awk '{print $1}')
+            if [ "$LOCAL_HASH" = "$REMOTE_HASH" ] && [ -n "$REMOTE_HASH" ]; then
+              echo "本地已是最新代码，复用缓存"
+              exit 0
+            else
+              echo "发现新版本，删除旧缓存重新拉取"
+              rm -rf openwrt
+            fi
+          fi
+          echo "全新拉取 $TAG 稳定版源码"
+          git clone --depth=1 -b "$TAG" "$REPO" openwrt
+
+      - name: 执行 diy-part1.sh（feeds 前加载第三方插件）
+        run: |
+          cd openwrt
+          cp ../${{ env.DIY_P1_SH }} .
+          bash ${{ env.DIY_P1_SH }}
+
+      - name: 更新并安装软件源
+        run: |
+          cd openwrt
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: 执行 diy-part2.sh（feeds 后修改配置+生成开机脚本）
+        run: |
+          cd openwrt
+          cp ../${{ env.DIY_P2_SH }} .
+          bash ${{ env.DIY_P2_SH }}
+
+      - name: 加载固件配置
+        run: |
+          cd openwrt
+          cp ../${{ env.CONFIG_FILE }} .config
+          make defconfig
+
+      - name: 开始编译固件
+        run: |
+          cd openwrt
+          make -j$(nproc) V=s
+
+      - name: 上传编译成品
+        uses: actions/upload-artifact@v4
+        with:
+          name: XDR6086-24.10.6-firmware
+          path: openwrt/bin/targets/mediatek/filogic/*.bin
